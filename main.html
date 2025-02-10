@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Battery Pack Charging & Balancing Simulation</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background: #f0f0f0;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      margin-bottom: 10px;
+    }
+    canvas {
+      border: 1px solid #333;
+      background: #fff;
+      margin: 20px auto;
+      display: block;
+    }
+    #controls {
+      margin-bottom: 20px;
+    }
+    #controls select, #controls button {
+      font-size: 16px;
+      padding: 6px 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Battery Pack Charging & Balancing Simulation</h1>
+  <div id="controls">
+    <label for="caseSelect">Select Simulation Case:</label>
+    <select id="caseSelect">
+      <option value="1">Case 1: Passive Balancing after Charge</option>
+      <option value="2">Case 2: Active Balancing after Charge</option>
+      <option value="3">Case 3: Active Charge Equalization during Charging</option>
+      <option value="4">Case 4: CCCVₘₐₓ Charging (Voltage Regulated)</option>
+    </select>
+    <button id="resetButton">Reset Simulation</button>
+  </div>
+  <canvas id="canvas" width="800" height="500"></canvas>
+
+  <script>
+    // =====================================================
+    // Global Variables and Constants
+    // =====================================================
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Battery model parameters:
+    const V_MIN = 3.0;      // Minimum (empty) cell voltage [V]
+    const V_MAX = 4.2;      // Ideal full–charge cell voltage [V] (open–circuit)
+    const OVP   = 4.2;      // Over–voltage protection threshold [V]
+    
+    // Charger & balancing parameters:
+    const I_BASE    = 0.005;   // Base charging current (arbitrary units)
+    const dPassive  = 0.001;   // Passive balancing decrement (in SOC units per step)
+    const dActive   = 0.001;   // Active balancing transfer (in SOC units per step)
+    const tolVoltage = 0.005;  // Tolerance (in volts) for equalization
+
+    // Simulation state variables:
+    let simulationCase = 1;   // 1,2,3, or 4 based on user selection
+    let phase = "charging";   // "charging", "balancing", or "done"
+    let chargingActive = true;
+    let simulationRunning = false;
+
+    // Each cell is modeled with capacity [Ah], state–of–charge (SOC 0–1), and internal resistance [Ω].
+    let cells = [];
+
+    // -----------------------------------------------------
+    // Initialize the three cells (series–connected)
+    // -----------------------------------------------------
+    function initCells() {
+      // Example parameters:
+      // • Cell 1: 3.0 Ah, initial SOC 70%, R = 0.05 Ω
+      // • Cell 2: 2.5 Ah, initial SOC 50%, R = 0.08 Ω
+      // • Cell 3: 3.5 Ah, initial SOC 90%, R = 0.03 Ω
+      cells = [
+        { capacity: 3.0,  SOC: 0.70, R: 0.05 },
+        { capacity: 2.5,  SOC: 0.50, R: 0.08 },
+        { capacity: 3.5,  SOC: 0.90, R: 0.03 }
+      ];
+    }
+
+    // -----------------------------------------------------
+    // Helper Functions: Open–Circuit Voltage & Measured Voltage
+    // -----------------------------------------------------
+    function getOCV(cell) {
+      // Assume a linear relation between SOC and OCV:
+      return V_MIN + (V_MAX - V_MIN) * cell.SOC;
+    }
+    function getMeasuredVoltage(cell, current) {
+      // When charging, the cell’s terminal voltage = OCV + (I * R)
+      // When not charging (or in balancing) current = 0.
+      return getOCV(cell) + (chargingActive ? current * cell.R : 0);
+    }
+
+    // -----------------------------------------------------
+    // Drawing the Cells
+    // Each cell is drawn as a vertical box with a green fill proportional to its SOC.
+    // The cell’s measured voltage and SOC (in %) are displayed.
+    // -----------------------------------------------------
+    function drawCells() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw simulation header info:
+      ctx.fillStyle = "black";
+      ctx.font = "16px Arial";
+      let caseText = "";
+      switch(simulationCase) {
+        case 1: caseText = "Case 1: Passive Balancing after Charge"; break;
+        case 2: caseText = "Case 2: Active Balancing after Charge"; break;
+        case 3: caseText = "Case 3: Active Charge Equalization during Charging"; break;
+        case 4: caseText = "Case 4: CCCVₘₐₓ Charging (Voltage Regulated)"; break;
+      }
+      ctx.fillText(caseText, 20, 30);
+      ctx.fillText("Phase: " + phase, 20, 50);
+
+      // Layout parameters for drawing cells:
+      const margin = 100;
+      const cellWidth = 100;
+      const cellHeight = 300;
+      const gap = (canvas.width - 2 * margin - cells.length * cellWidth) / (cells.length - 1);
+
+      cells.forEach((cell, i) => {
+        let x = margin + i * (cellWidth + gap);
+        let y = canvas.height - margin - cellHeight;
+        // Draw the cell outline:
+        ctx.strokeStyle = "black";
+        ctx.strokeRect(x, y, cellWidth, cellHeight);
+        // Fill based on SOC (display is capped at 100%):
+        let socDisplay = Math.min(cell.SOC, 1);
+        let fillHeight = cellHeight * socDisplay;
+        let fillY = y + cellHeight - fillHeight;
+        ctx.fillStyle = "green";
+        ctx.fillRect(x, fillY, cellWidth, fillHeight);
+
+        // Compute current used for voltage calculation:
+        let currentForCalc = (simulationCase === 4 && chargingActive) ? getChargingCurrentCase4() : (chargingActive ? I_BASE : 0);
+        let voltage = getMeasuredVoltage(cell, currentForCalc).toFixed(2);
+        // Display cell info:
+        ctx.fillStyle = "black";
+        ctx.font = "14px Arial";
+        ctx.fillText("Cell " + (i+1), x + 10, y - 30);
+        ctx.fillText("SOC: " + (cell.SOC * 100).toFixed(1) + "%", x + 10, y - 10);
+        ctx.fillText("V: " + voltage + " V", x + 10, y + cellHeight + 20);
+      });
+    }
+
+    // -----------------------------------------------------
+    // For Case 4: Adjust the charging current if the maximum cell voltage is near OVP.
+    // -----------------------------------------------------
+    function getChargingCurrentCase4() {
+      let maxV = 0;
+      cells.forEach(cell => {
+        let v = getMeasuredVoltage(cell, I_BASE);
+        if (v > maxV) { maxV = v; }
+      });
+      // If the highest measured voltage is at or above OVP, reduce current (simulate constant–voltage regulation)
+      if (maxV >= OVP) {
+        return I_BASE * 0.1;  // a significantly reduced current
+      } else {
+        return I_BASE;
+      }
+    }
+
+    // -----------------------------------------------------
+    // Simulation Update: Charging and Balancing
+    // -----------------------------------------------------
+    function updateSimulation() {
+      // --- Charging Phase ---
+      if (phase === "charging") {
+        // Determine effective charging current:
+        let I_effective = I_BASE;
+        if (simulationCase === 4) {
+          I_effective = getChargingCurrentCase4();
+        }
+        // Increase each cell’s SOC based on its capacity.
+        if (chargingActive) {
+          cells.forEach(cell => {
+            // The SOC increment is (I_effective / capacity); note that smaller–capacity cells charge faster.
+            cell.SOC += I_effective / cell.capacity;
+            if (cell.SOC > 1) { cell.SOC = 1; }
+          });
+        }
+
+        // For Cases 1 & 2, if any cell’s measured voltage reaches/exceeds OVP, disable charging.
+        if (simulationCase === 1 || simulationCase === 2) {
+          let overvoltage = cells.some(cell => getMeasuredVoltage(cell, I_effective) >= OVP);
+          if (overvoltage) {
+            chargingActive = false;
+            phase = "balancing";
+          }
+        }
+
+        // For Case 3, perform active equalization during charging:
+        if (simulationCase === 3) {
+          // Find the cell with the highest voltage (donor) and the one with the lowest (receiver)
+          let maxIndex = 0, minIndex = 0;
+          let maxVoltage = getMeasuredVoltage(cells[0], I_effective);
+          let minVoltage = getMeasuredVoltage(cells[0], I_effective);
+          cells.forEach((cell, i) => {
+            let v = getMeasuredVoltage(cell, I_effective);
+            if (v > maxVoltage) { maxVoltage = v; maxIndex = i; }
+            if (v < minVoltage) { minVoltage = v; minIndex = i; }
+          });
+          // If the imbalance is significant, transfer a small amount of charge:
+          if (maxVoltage - minVoltage > tolVoltage) {
+            cells[maxIndex].SOC -= dActive;
+            cells[minIndex].SOC += dActive;
+            // Clamp SOC values to [0,1]:
+            if (cells[maxIndex].SOC < 0) { cells[maxIndex].SOC = 0; }
+            if (cells[minIndex].SOC > 1) { cells[minIndex].SOC = 1; }
+          }
+        }
+      }
+      // --- Balancing Phase (for Cases 1 & 2) ---
+      else if (phase === "balancing") {
+        // In balancing mode no charging current is applied.
+        if (simulationCase === 1) {
+          // Passive balancing: find the lowest (safe) voltage and discharge any cell above it.
+          let minVoltage = Math.min(...cells.map(cell => getMeasuredVoltage(cell, 0)));
+          cells.forEach(cell => {
+            let v = getMeasuredVoltage(cell, 0);
+            if (v > minVoltage + tolVoltage) {
+              cell.SOC -= dPassive;
+              if (cell.SOC < 0) { cell.SOC = 0; }
+            }
+          });
+        } else if (simulationCase === 2) {
+          // Active balancing: transfer charge from the cell with the highest voltage to the one with the lowest.
+          let maxIndex = 0, minIndex = 0;
+          let maxVoltage = getMeasuredVoltage(cells[0], 0);
+          let minVoltage = getMeasuredVoltage(cells[0], 0);
+          cells.forEach((cell, i) => {
+            let v = getMeasuredVoltage(cell, 0);
+            if (v > maxVoltage) { maxVoltage = v; maxIndex = i; }
+            if (v < minVoltage) { minVoltage = v; minIndex = i; }
+          });
+          if (maxVoltage - minVoltage > tolVoltage) {
+            cells[maxIndex].SOC -= dActive;
+            cells[minIndex].SOC += dActive;
+            if (cells[maxIndex].SOC < 0) { cells[maxIndex].SOC = 0; }
+            if (cells[minIndex].SOC > 1) { cells[minIndex].SOC = 1; }
+          }
+        }
+        // If the cell voltages are nearly equal, the balancing is complete.
+        let voltages = cells.map(cell => getMeasuredVoltage(cell, 0));
+        if (Math.max(...voltages) - Math.min(...voltages) < tolVoltage) {
+          phase = "done";
+        }
+      }
+
+      // --- End Condition for Cases 3 & 4 ---
+      // For cases where charging continues (with active equalization or voltage–regulated),
+      // finish when all cells are nearly full and balanced.
+      if ((simulationCase === 3 || simulationCase === 4) && phase === "charging") {
+        let currentForCalc = (simulationCase === 4 && chargingActive) ? getChargingCurrentCase4() : I_BASE;
+        let voltages = cells.map(cell => getMeasuredVoltage(cell, currentForCalc));
+        let allFull = cells.every(cell => cell.SOC >= 0.99);
+        if (allFull && (Math.max(...voltages) - Math.min(...voltages)) < tolVoltage) {
+          phase = "done";
+        }
+      }
+    }
+
+    // -----------------------------------------------------
+    // Animation Loop
+    // -----------------------------------------------------
+    function animate() {
+      if (!simulationRunning) return;
+      updateSimulation();
+      drawCells();
+      if (phase !== "done") {
+        requestAnimationFrame(animate);
+      } else {
+        ctx.fillStyle = "blue";
+        ctx.font = "24px Arial";
+        ctx.fillText("Simulation Done", 300, 60);
+        simulationRunning = false;
+      }
+    }
+
+    // -----------------------------------------------------
+    // Reset and Start the Simulation
+    // -----------------------------------------------------
+    function resetSimulation() {
+      simulationCase = parseInt(document.getElementById("caseSelect").value);
+      phase = "charging";
+      chargingActive = true;
+      initCells();
+      simulationRunning = true;
+      animate();
+    }
+    document.getElementById("resetButton").addEventListener("click", resetSimulation);
+
+    // Start the simulation when the page loads.
+    resetSimulation();
+  </script>
+</body>
+</html>
